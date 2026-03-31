@@ -1,13 +1,6 @@
 """
-面部特征点检测组件 (Face Landmark Detector)
-
-该模块封装了 Google MediaPipe 的 Face Mesh 模型。
-作为大型项目的一个子组件，它负责处理输入的图像帧，
-提取 478 个面部特征点（包含虹膜等细节），并提供可视化辅助方法。
-
-依赖项:
-    - opencv-python (cv2)
-    - mediapipe
+面部特征点检测组件
+提供高鲁棒性的面部特征和视线特征提取。
 """
 
 import cv2
@@ -15,39 +8,19 @@ import mediapipe as mp
 import numpy as np
 from typing import Optional, Tuple, List, Any
 
-
 class FaceLandmarkDetector:
-    """
-    面部特征点检测器类。
-
-    封装了 MediaPipe Face Mesh 方案，提供图像处理、特征点提取和绘制功能。
-    支持作为上下文管理器 (Context Manager) 使用，以确保资源正确释放。
-    """
-
     def __init__(
-            self,
-            static_image_mode: bool = False,
-            max_num_faces: int = 1,
-            refine_landmarks: bool = True,
-            min_detection_confidence: float = 0.5,
-            min_tracking_confidence: float = 0.5,
+        self,
+        static_image_mode: bool = False,
+        max_num_faces: int = 1,
+        refine_landmarks: bool = True,
+        min_detection_confidence: float = 0.5,
+        min_tracking_confidence: float = 0.5,
     ):
-        """
-        初始化面部特征点检测器。
-
-        参数:
-            static_image_mode: 如果设为 True，则将输入图像视为独立的静态图片；
-                               如果设为 False，则将其视为视频流，以提高跟踪效率。
-            max_num_faces: 允许检测的最大面部数量。
-            refine_landmarks: 是否进一步细化眼睛、嘴唇周围的特征点，并输出虹膜特征点（总共478个点）。
-            min_detection_confidence: 初始检测的最小置信度阈值 (0.0 ~ 1.0)。
-            min_tracking_confidence: 跟踪的最小置信度阈值 (0.0 ~ 1.0)。
-        """
         self.mp_face_mesh = mp.solutions.face_mesh
         self.mp_drawing = mp.solutions.drawing_utils
         self.mp_drawing_styles = mp.solutions.drawing_styles
 
-        # 初始化 MediaPipe FaceMesh 对象
         self.face_mesh = self.mp_face_mesh.FaceMesh(
             static_image_mode=static_image_mode,
             max_num_faces=max_num_faces,
@@ -57,112 +30,171 @@ class FaceLandmarkDetector:
         )
 
     def process_frame(self, frame: np.ndarray) -> Any:
-        """
-        处理单帧图像，提取面部特征点。
-
-        参数:
-            frame: OpenCV 格式的 BGR 图像帧 (numpy array)。
-
-        返回:
-            results: MediaPipe 处理后的结果对象。包含 .multi_face_landmarks 属性。
-        """
-        # 为了提高性能，可以选择将图像标记为不可写，以通过引用传递
         frame.flags.writeable = False
-
-        # OpenCV 默认使用 BGR 颜色空间，而 MediaPipe 需要 RGB
         frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-
-        # 处理图像并返回结果
         results = self.face_mesh.process(frame_rgb)
-
-        # 恢复图像可写状态
         frame.flags.writeable = True
-
         return results
 
-    def extract_landmarks(
-            self,
-            results: Any,
-            image_shape: Tuple[int, int, int]
-    ) -> List[List[Tuple[int, int]]]:
+    def extract_comprehensive_features(self, results: Any, image_shape: Tuple) -> Optional[dict]:
         """
-        从处理结果中提取像素坐标格式的特征点数据，方便下游任务处理。
-
-        参数:
-            results: process_frame() 返回的 MediaPipe 结果对象。
-            image_shape: 输入图像的形状 (height, width, channels)。
-
-        返回:
-            一个列表，包含检测到的所有面部。每个面部是一个包含 (x, y) 像素坐标元组的列表。
-            如果没有检测到人脸，则返回空列表。
+        提取用于视线追踪的综合特征向量，包含头部姿态和基于局部坐标系的眼球特征。
         """
-        faces_landmarks = []
         if not results.multi_face_landmarks:
-            return faces_landmarks
+            return None
 
-        h, w, _ = image_shape
-        for face_landmarks in results.multi_face_landmarks:
-            # 将归一化坐标转换为像素坐标
-            pixel_landmarks = [
-                (int(landmark.x * w), int(landmark.y * h))
-                for landmark in face_landmarks.landmark
-            ]
-            faces_landmarks.append(pixel_landmarks)
+        face_landmarks = results.multi_face_landmarks[0]
+        h_img, w = image_shape[:2]
 
-        return faces_landmarks
+        # 1. 估计头部姿态
+        head_pose = self._estimate_head_pose(face_landmarks, (h_img, w))
+
+        # 2. 提取眼部局部相对特征 (基于投影法)
+        def get_relative_iris_pos(left_idx, right_idx, top_idx, bottom_idx, iris_idx):
+            """
+            建立局部坐标系并投影虹膜位置。
+            参数传入的 left 和 right 是指屏幕上的左和右，方便统一 X 轴方向。
+            """
+            p_left = np.array([face_landmarks.landmark[left_idx].x * w, face_landmarks.landmark[left_idx].y * h_img])
+            p_right = np.array([face_landmarks.landmark[right_idx].x * w, face_landmarks.landmark[right_idx].y * h_img])
+            p_top = np.array([face_landmarks.landmark[top_idx].x * w, face_landmarks.landmark[top_idx].y * h_img])
+            p_bottom = np.array([face_landmarks.landmark[bottom_idx].x * w, face_landmarks.landmark[bottom_idx].y * h_img])
+            iris = np.array([face_landmarks.landmark[iris_idx].x * w, face_landmarks.landmark[iris_idx].y * h_img])
+
+            # 计算眼睛的中心点
+            center = (p_left + p_right) / 2.0
+
+            # 定义局部 X 轴 (向右) 和 Y 轴 (向下)
+            vec_x = p_right - p_left
+            vec_y = p_bottom - p_top
+
+            width = np.linalg.norm(vec_x)
+            height = np.linalg.norm(vec_y)
+
+            if width < 1e-5 or height < 1e-5:
+                return 0.0, 0.0
+
+            dir_x = vec_x / width
+            dir_y = vec_y / height
+
+            # 虹膜偏离中心的向量
+            vec_iris = iris - center
+
+            # 投影到 X 和 Y 轴上，并归一化到 [-1, 1] 区间
+            # 除以 (width/2) 是因为从中心到边缘的距离是宽度的一半
+            rel_x = np.dot(vec_iris, dir_x) / (width / 2.0)
+            rel_y = np.dot(vec_iris, dir_y) / (height / 2.0)
+
+            return float(rel_x), float(rel_y)
+
+        if len(face_landmarks.landmark) > 473:
+            # 屏幕右侧的眼睛 (用户的左眼): 左眼角133, 右眼角33, 上159, 下145, 虹膜468
+            l_iris_rel_x, l_iris_rel_y = get_relative_iris_pos(133, 33, 159, 145, 468)
+            # 屏幕左侧的眼睛 (用户的右眼): 左眼角263, 右眼角362, 上386, 下374, 虹膜473
+            r_iris_rel_x, r_iris_rel_y = get_relative_iris_pos(263, 362, 386, 374, 473)
+        else:
+            l_iris_rel_x, l_iris_rel_y, r_iris_rel_x, r_iris_rel_y = 0.0, 0.0, 0.0, 0.0
+
+        return {
+            "head_pitch": head_pose["pitch"],
+            "head_yaw": head_pose["yaw"],
+            "head_roll": head_pose["roll"],
+            "head_tx": head_pose["tvec"][0][0],
+            "head_ty": head_pose["tvec"][1][0],
+            "head_tz": head_pose["tvec"][2][0],
+            "l_iris_rel_x": l_iris_rel_x,
+            "l_iris_rel_y": l_iris_rel_y,
+            "r_iris_rel_x": r_iris_rel_x,
+            "r_iris_rel_y": r_iris_rel_y,
+            "rvec": head_pose["rvec"],
+            "tvec": head_pose["tvec"]
+        }
+
+    def _estimate_head_pose(self, face_landmarks: Any, image_size: Tuple[int, int]) -> dict:
+        h, w = image_size
+        image_points = np.array([
+            (face_landmarks.landmark[1].x * w, face_landmarks.landmark[1].y * h),
+            (face_landmarks.landmark[152].x * w, face_landmarks.landmark[152].y * h),
+            (face_landmarks.landmark[33].x * w, face_landmarks.landmark[33].y * h),
+            (face_landmarks.landmark[263].x * w, face_landmarks.landmark[263].y * h),
+            (face_landmarks.landmark[61].x * w, face_landmarks.landmark[61].y * h),
+            (face_landmarks.landmark[291].x * w, face_landmarks.landmark[291].y * h)
+        ], dtype="double")
+
+        model_points = np.array([
+            (0.0, 0.0, 0.0),
+            (0.0, -330.0, -65.0),
+            (-225.0, 170.0, -135.0),
+            (225.0, 170.0, -135.0),
+            (-150.0, -150.0, -125.0),
+            (150.0, -150.0, -125.0)
+        ])
+
+        focal_length = w
+        center = (w / 2, h / 2)
+        camera_matrix = np.array(
+            [[focal_length, 0, center[0]],
+             [0, focal_length, center[1]],
+             [0, 0, 1]], dtype="double"
+        )
+        dist_coeffs = np.zeros((4, 1))
+
+        success, rvec, tvec = cv2.solvePnP(model_points, image_points, camera_matrix, dist_coeffs)
+        rmat, _ = cv2.Rodrigues(rvec)
+
+        sy = np.sqrt(rmat[0, 0] * rmat[0, 0] + rmat[1, 0] * rmat[1, 0])
+        singular = sy < 1e-6
+        if not singular:
+            x = np.arctan2(rmat[2, 1], rmat[2, 2])
+            y = np.arctan2(-rmat[2, 0], sy)
+            z = np.arctan2(rmat[1, 0], rmat[0, 0])
+        else:
+            x = np.arctan2(-rmat[1, 2], rmat[1, 1])
+            y = np.arctan2(-rmat[2, 0], sy)
+            z = 0
+
+        return {
+            "pitch": np.degrees(x),
+            "yaw": np.degrees(y),
+            "roll": np.degrees(z),
+            "rvec": rvec,
+            "tvec": tvec,
+            "camera_matrix": camera_matrix,
+            "dist_coeffs": dist_coeffs
+        }
 
     def draw_landmarks(self, frame: np.ndarray, results: Any) -> np.ndarray:
-        """
-        在给定的图像帧上绘制检测到的面部特征点及网格。
-
-        参数:
-            frame: 原始 OpenCV BGR 图像帧。
-            results: process_frame() 返回的 MediaPipe 结果对象。
-
-        返回:
-            绘制了特征点的 BGR 图像帧。
-        """
         if not results.multi_face_landmarks:
             return frame
-
         annotated_frame = frame.copy()
         for face_landmarks in results.multi_face_landmarks:
-            # 绘制面部网格底图
             self.mp_drawing.draw_landmarks(
-                image=annotated_frame,
-                landmark_list=face_landmarks,
+                image=annotated_frame, landmark_list=face_landmarks,
                 connections=self.mp_face_mesh.FACEMESH_TESSELATION,
                 landmark_drawing_spec=None,
                 connection_drawing_spec=self.mp_drawing_styles.get_default_face_mesh_tesselation_style()
             )
-            # 绘制面部轮廓
             self.mp_drawing.draw_landmarks(
-                image=annotated_frame,
-                landmark_list=face_landmarks,
+                image=annotated_frame, landmark_list=face_landmarks,
                 connections=self.mp_face_mesh.FACEMESH_CONTOURS,
                 landmark_drawing_spec=None,
                 connection_drawing_spec=self.mp_drawing_styles.get_default_face_mesh_contours_style()
             )
-            # 绘制虹膜 (如果 refine_landmarks 为 True)
-            if hasattr(self.mp_face_mesh, 'FACEMESH_IRISES'):
-                self.mp_drawing.draw_landmarks(
-                    image=annotated_frame,
-                    landmark_list=face_landmarks,
-                    connections=self.mp_face_mesh.FACEMESH_IRISES,
-                    landmark_drawing_spec=None,
-                    connection_drawing_spec=self.mp_drawing_styles.get_default_face_mesh_iris_connections_style()
-                )
-
         return annotated_frame
 
+    def get_eye_features(self, results: Any) -> Optional[np.ndarray]:
+        # 兼容旧的方法，供基础版使用
+        if not results.multi_face_landmarks: return None
+        face_landmarks = results.multi_face_landmarks[0]
+        if len(face_landmarks.landmark) <= 473: return None
+        l_iris, r_iris = face_landmarks.landmark[468], face_landmarks.landmark[473]
+        return np.array([l_iris.x, l_iris.y, r_iris.x, r_iris.y])
+
     def close(self):
-        """释放 MediaPipe 资源。"""
         self.face_mesh.close()
 
     def __enter__(self):
-        """支持 'with' 语句的上下文管理器进入方法。"""
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        """支持 'with' 语句的上下文管理器退出方法，自动释放资源。"""
         self.close()

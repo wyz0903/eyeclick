@@ -1,90 +1,125 @@
 """
-面部特征点检测测试与调试脚本。
-
-该脚本调用 face_landmark_detector.py 中的组件，
-打开电脑前置摄像头，实时进行面部特征点检测，并将结果渲染到屏幕上。
-同时在左上角显示实时的 FPS (每秒帧数) 供性能调试。
-
-运行方法:
-    python test_camera.py
+面部特征与视线可视化测试脚本。
 """
 
 import cv2
-import time
+import numpy as np
 from face_feature_MediaPipe import FaceLandmarkDetector
 
+def draw_head_pose_axes(frame, rvec, tvec, camera_matrix, dist_coeffs):
+    """在鼻尖绘制表示头部朝向的 3D 坐标轴"""
+    axis = np.float32([[500, 0, 0], [0, 500, 0], [0, 0, 500]])
+    imgpts, _ = cv2.projectPoints(axis, rvec, tvec, camera_matrix, dist_coeffs)
+    imgpts = np.int32(imgpts).reshape(-1, 2)
+
+    origin, _ = cv2.projectPoints(np.array([(0.0, 0.0, 0.0)]), rvec, tvec, camera_matrix, dist_coeffs)
+    origin = tuple(np.int32(origin).reshape(2))
+
+    frame = cv2.line(frame, origin, tuple(imgpts[0]), (0, 0, 255), 3) # X轴: Pitch
+    frame = cv2.line(frame, origin, tuple(imgpts[1]), (0, 255, 0), 3) # Y轴: Yaw
+    frame = cv2.line(frame, origin, tuple(imgpts[2]), (255, 0, 0), 3) # Z轴: Roll
+    return frame
+
+def draw_gaze_lines(frame, features, landmarks, h, w):
+    """根据眼部相对特征绘制高灵敏度的视线射线"""
+    # 屏幕右侧眼睛 (用户左眼) 的近似中心
+    l_center = np.array([(landmarks[133].x + landmarks[33].x) / 2 * w,
+                         (landmarks[159].y + landmarks[145].y) / 2 * h])
+
+    # 屏幕左侧眼睛 (用户右眼) 的近似中心
+    r_center = np.array([(landmarks[263].x + landmarks[362].x) / 2 * w,
+                         (landmarks[386].y + landmarks[374].y) / 2 * h])
+
+    # 放大系数，控制箭头的长度和灵敏度
+    # 因为现在的 rel_x 和 rel_y 在中心时严格等于 0，我们可以放心大胆地放大
+    multiplier = 150
+
+    # 计算射线终点：由于 rel_x 和 rel_y 正值分别代表向右和向下，直接加到中心坐标上即可
+    l_gaze_end = (int(l_center[0] + features['l_iris_rel_x'] * multiplier),
+                  int(l_center[1] + features['l_iris_rel_y'] * multiplier))
+
+    r_gaze_end = (int(r_center[0] + features['r_iris_rel_x'] * multiplier),
+                  int(r_center[1] + features['r_iris_rel_y'] * multiplier))
+
+    l_center_tuple = (int(l_center[0]), int(l_center[1]))
+    r_center_tuple = (int(r_center[0]), int(r_center[1]))
+
+    # 绘制黄色的视线箭头
+    cv2.arrowedLine(frame, l_center_tuple, l_gaze_end, (0, 255, 255), 2, tipLength=0.3)
+    cv2.arrowedLine(frame, r_center_tuple, r_gaze_end, (0, 255, 255), 2, tipLength=0.3)
+
+    # 绘制瞳孔中心点（红点），方便核对
+    l_iris_actual = (int(landmarks[468].x * w), int(landmarks[468].y * h))
+    r_iris_actual = (int(landmarks[473].x * w), int(landmarks[473].y * h))
+    cv2.circle(frame, l_iris_actual, 2, (0, 0, 255), -1)
+    cv2.circle(frame, r_iris_actual, 2, (0, 0, 255), -1)
+
+    return frame
 
 def main():
-    """主程序：初始化摄像头和检测器，并运行实时循环。"""
-
-    # 初始化视频捕获对象，0 通常代表默认的前置摄像头
     cap = cv2.VideoCapture(0)
-
-    # 检查摄像头是否成功打开
     if not cap.isOpened():
-        print("错误：无法打开摄像头。请检查设备连接或权限。")
+        print("无法打开摄像头")
         return
 
-    print("提示：按 'q' 键或 'ESC' 键退出程序。")
-
-    # 记录上一帧的时间，用于计算 FPS
-    prev_time = 0
-
-    # 使用上下文管理器 (with 语句) 初始化检测器，确保程序结束时资源自动释放
-    with FaceLandmarkDetector(
-            max_num_faces=1,
-            refine_landmarks=True
-    ) as detector:
-
+    with FaceLandmarkDetector(max_num_faces=1, refine_landmarks=True) as detector:
         while True:
-            # 读取一帧图像
             success, frame = cap.read()
-            if not success:
-                print("警告：忽略空的摄像机帧。")
-                continue
+            if not success: continue
 
-            # 水平翻转图像，使显示画面表现为镜像（更符合用户的直觉）
             frame = cv2.flip(frame, 1)
+            h, w = frame.shape[:2]
 
-            # 调用组件：处理图像并获取结果
             results = detector.process_frame(frame)
+            # 可选：注释掉下一行可以关闭绿色网格显示，让画面更干净
+            # annotated_frame = detector.draw_landmarks(frame.copy(), results)
+            annotated_frame = frame.copy()
 
-            # 测试：提取像素坐标（下游任务处理演示，当前脚本不实际使用它，只做打印或断点观察）
-            # landmarks_list = detector.extract_landmarks(results, frame.shape)
-            # if landmarks_list:
-            #     print(f"检测到 {len(landmarks_list)} 张人脸，第一张人脸特征点数量：{len(landmarks_list[0])}")
+            features = detector.extract_comprehensive_features(results, (h, w))
 
-            # 调用组件：将特征点渲染回图像帧上
-            annotated_frame = detector.draw_landmarks(frame, results)
+            if features and results.multi_face_landmarks:
+                landmarks = results.multi_face_landmarks[0].landmark
 
-            # 计算并绘制 FPS
-            current_time = time.time()
-            fps = 1 / (current_time - prev_time) if prev_time > 0 else 0
-            prev_time = current_time
+                # 绘制头部坐标轴
+                camera_matrix = np.array([[w, 0, w/2], [0, w, h/2], [0, 0, 1]], dtype="double")
+                dist_coeffs = np.zeros((4, 1))
+                annotated_frame = draw_head_pose_axes(
+                    annotated_frame, features["rvec"], features["tvec"], camera_matrix, dist_coeffs
+                )
 
-            cv2.putText(
-                annotated_frame,
-                f'FPS: {int(fps)}',
-                (20, 50),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                1,
-                (0, 255, 0),
-                2
-            )
+                # 绘制视线
+                annotated_frame = draw_gaze_lines(annotated_frame, features, landmarks, h, w)
 
-            # 显示结果
-            cv2.imshow('Face Landmark Detection Test', annotated_frame)
+                # 数值面板
+                y_pos = 30
+                texts = [
+                    f"Head Pitch: {features['head_pitch']:+05.1f}",
+                    f"Head Yaw  : {features['head_yaw']:+05.1f}",
+                    f"Head Roll : {features['head_roll']:+05.1f}",
+                    f"Eye L Rel : X {features['l_iris_rel_x']:+0.2f}  Y {features['l_iris_rel_y']:+0.2f}",
+                    f"Eye R Rel : X {features['r_iris_rel_x']:+0.2f}  Y {features['r_iris_rel_y']:+0.2f}",
+                ]
 
-            # 监听按键输入，按 'q' (键码113) 或 'ESC' (键码27) 退出
-            key = cv2.waitKey(1) & 0xFF
-            if key == ord('q') or key == 27:
-                print("退出程序...")
+                cv2.rectangle(annotated_frame, (10, 10), (380, 180), (0, 0, 0), -1)
+                for txt in texts:
+                    # 当眼球坐标偏离中心超过 0.1 时，将字体颜色变绿以示反馈
+                    color = (255, 255, 255)
+                    if "Eye" in txt:
+                        rel_x = float(txt.split("X ")[1].split(" ")[0])
+                        rel_y = float(txt.split("Y ")[1])
+                        if abs(rel_x) > 0.15 or abs(rel_y) > 0.15:
+                            color = (0, 255, 0)
+
+                    cv2.putText(annotated_frame, txt, (20, y_pos), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+                    y_pos += 30
+
+            cv2.imshow('Robust Features & Gaze Visualizer', annotated_frame)
+
+            if cv2.waitKey(1) & 0xFF in [27, ord('q')]:
                 break
 
-    # 释放摄像头资源并关闭所有 OpenCV 窗口
     cap.release()
     cv2.destroyAllWindows()
-
 
 if __name__ == "__main__":
     main()
