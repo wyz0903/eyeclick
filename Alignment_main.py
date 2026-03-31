@@ -1,6 +1,6 @@
 import cv2
 import time
-from face_feature import FaceLandmarkDetector
+from face_feature_Face_Alignment import FaceLandmarkDetector
 
 def main():
     """
