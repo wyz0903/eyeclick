@@ -13,7 +13,7 @@ class FaceLandmarkDetector:
     """
 
     def __init__(self,
-                 enable_3d: bool = False,
+                 enable_3d: bool = True,
                  device: str = 'cpu',
                  face_detector: str = 'sfd'):
         """

@@ -10,7 +10,7 @@ def main():
     # 1. 实例化组件
     # 注意：如果您的电脑配有 NVIDIA 显卡且已配置好 CUDA 环境，请将 device='cpu' 更改为 device='cuda'
     # 这样可以大幅提升实时处理的帧率。
-    detector = FaceLandmarkDetector(enable_3d=False, device='cpu', face_detector='sfd')
+    detector = FaceLandmarkDetector(enable_3d=True, device='cuda', face_detector='sfd')
 
     # 2. 打开前置摄像头 (0 通常是系统默认的前置摄像头)
     camera_id = 0
