@@ -1,98 +1,90 @@
-"""
-面部特征点检测组件测试脚本 (Test Script for Face Landmark Detector)
-
-该脚本负责打开电脑前置摄像头，读取实时视频流，
-并调用 face_landmark_detector.py 中的类来进行实时的人脸网格检测和显示。
-
-使用方法:
-    直接运行此脚本即可开启测试界面： python test_camera.py
-    按下 'q' 键或 'ESC' 键退出程序。
-"""
-
 import cv2
-import sys
 import time
-# 从我们封装好的组件模块中导入检测器类
 from face_feature import FaceLandmarkDetector
 
-
 def main():
-    print("正在初始化摄像头...")
-    # 尝试打开默认摄像头 (索引为 0 的前置摄像头)
-    cap = cv2.VideoCapture(0)
+    """
+    主测试函数。
+    负责打开前置摄像头，读取视频流，调用组件进行处理，并实时显示帧率(FPS)和结果。
+    """
+    # 1. 实例化组件
+    # 注意：如果您的电脑配有 NVIDIA 显卡且已配置好 CUDA 环境，请将 device='cpu' 更改为 device='cuda'
+    # 这样可以大幅提升实时处理的帧率。
+    detector = FaceLandmarkDetector(enable_3d=False, device='cpu', face_detector='sfd')
+
+    # 2. 打开前置摄像头 (0 通常是系统默认的前置摄像头)
+    camera_id = 0
+    cap = cv2.VideoCapture(camera_id)
 
     if not cap.isOpened():
-        print("错误: 无法打开前置摄像头。请检查摄像头是否被占用或连接是否正常。")
-        sys.exit(1)
+        print(f"[ERROR] 无法打开摄像头 (ID: {camera_id})。请检查设备连接。")
+        return
 
-    # 尝试设置摄像头分辨率 (可选，可以根据需求注释掉)
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+    print("[INFO] 摄像头已打开。按 'q' 键退出测试。")
 
-    print("摄像头初始化成功。正在加载面部特征点检测模型...")
-    # 实例化我们的组件类
-    # 使用针对视频流优化的默认参数 (static_image_mode=False)
-    detector = FaceLandmarkDetector(
-        max_num_faces=1,  # 这里我们设置为只检测一张脸作为测试
-        min_detection_confidence=0.5,
-        min_tracking_confidence=0.5
-    )
-
-    print("模型加载完成。开始实时检测。按下 'q' 或 'ESC' 键退出...")
-
-    # 用于计算 FPS (帧率)
-    prev_time = 0
+    # 用于计算 FPS 的变量
+    prev_time = time.time()
 
     try:
         while True:
-            # 1. 读取摄像头帧
-            success, frame = cap.read()
-            if not success:
-                print("警告: 忽略空白摄像头帧。")
+            # 3. 读取一帧图像
+            ret, frame = cap.read()
+            if not ret:
+                print("[WARNING] 无法从摄像头读取画面，跳过此帧。")
                 continue
 
-            # 建议将前置摄像头的画面水平翻转，以便实现“镜像”效果，更符合直觉
+            # 4. 镜像翻转图像 (前置摄像头通常需要镜像处理，符合用户直觉)
             frame = cv2.flip(frame, 1)
 
-            # 2. 将帧传递给组件进行检测
-            results = detector.detect_landmarks(frame)
+            # 5. 调用组件核心功能：检测并绘制特征点
+            # 这里调用了高级封装 API process_and_draw
+            processed_frame, landmarks = detector.process_and_draw(frame)
 
-            # 3. 在画面上绘制特征点 (可视化)
-            annotated_frame = detector.draw_landmarks(frame, results)
-
-            # (可选测试) 演示如何获取具体的坐标点列表
-            # coords = detector.extract_landmark_coordinates(frame, results)
-            # if coords:
-            #     print(f"检测到人脸，特征点数量: {len(coords[0])}")
-
-            # 4. 计算并显示 FPS
+            # 6. 计算并绘制 FPS (性能监控)
             curr_time = time.time()
-            fps = 1 / (curr_time - prev_time) if (curr_time - prev_time) > 0 else 0
+            fps = 1.0 / (curr_time - prev_time) if (curr_time - prev_time) > 0 else 0
             prev_time = curr_time
+
+            # 在图像左上角显示 FPS 信息
             cv2.putText(
-                annotated_frame, f'FPS: {int(fps)}', (20, 50),
-                cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2
+                processed_frame,
+                f"FPS: {fps:.1f}",
+                (10, 30),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                1,
+                (0, 0, 255), # 红色字体
+                2
             )
 
-            # 5. 显示最终处理后的画面
-            cv2.imshow('Face Landmark Detection Test', annotated_frame)
+            # 并在屏幕上提示检测到的人脸数量
+            face_count = len(landmarks) if landmarks else 0
+            cv2.putText(
+                processed_frame,
+                f"Faces: {face_count}",
+                (10, 70),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                1,
+                (255, 0, 0), # 蓝色字体
+                2
+            )
 
-            # 6. 处理键盘输入
-            key = cv2.waitKey(1) & 0xFF
-            # 按 'q' 或 ESC 键退出
-            if key == ord('q') or key == 27:
+            # 7. 实时显示结果
+            cv2.imshow("Face Landmark Detector Test", processed_frame)
+
+            # 8. 监听按键事件，按 'q' 键退出循环
+            if cv2.waitKey(1) & 0xFF == ord('q'):
+                print("[INFO] 收到退出指令，正在关闭...")
                 break
 
     except KeyboardInterrupt:
-        print("\n检测到键盘中断，准备退出...")
+        print("[INFO] 强制中断，正在清理资源...")
+    except Exception as e:
+        print(f"[ERROR] 运行时发生异常: {e}")
     finally:
-        # 7. 优雅地清理和释放资源
-        print("正在释放资源...")
-        detector.release()
+        # 9. 资源清理阶段 (防御性编程，确保资源得到释放)
         cap.release()
         cv2.destroyAllWindows()
-        print("程序已退出。")
-
+        print("[INFO] 资源已释放。测试结束。")
 
 if __name__ == "__main__":
     main()
